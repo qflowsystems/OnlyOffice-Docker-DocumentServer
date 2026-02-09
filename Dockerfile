@@ -97,6 +97,50 @@ RUN echo "#!/bin/sh\nexit 0" > /usr/sbin/policy-rc.d && \
     service nginx stop && \
     rm -rf /var/lib/apt/lists/*
 
+# Build and install OpenSSL FIPS provider for FIPS-enabled environments
+# This allows the container to work on RHEL/CentOS hosts with FIPS mode enabled
+ARG OPENSSL_FIPS_VERSION=3.0.9
+RUN apt-get -y update && \
+    apt-get -yq install build-essential dpkg-dev && \
+    cd /tmp && \
+    wget -q https://www.openssl.org/source/openssl-${OPENSSL_FIPS_VERSION}.tar.gz && \
+    tar -xzf openssl-${OPENSSL_FIPS_VERSION}.tar.gz && \
+    cd openssl-${OPENSSL_FIPS_VERSION} && \
+    ./Configure enable-fips --prefix=/usr --openssldir=/etc/ssl && \
+    make -j$(nproc) && \
+    cp providers/fips.so /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/ossl-modules/ && \
+    openssl fipsinstall -out /etc/ssl/fipsmodule.cnf -module /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/ossl-modules/fips.so && \
+    cd / && \
+    rm -rf /tmp/openssl-${OPENSSL_FIPS_VERSION}* && \
+    apt-get -y purge build-essential && \
+    apt-get -y autoremove && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create FIPS-enabled OpenSSL configuration file
+RUN printf '%s\n' \
+    'openssl_conf = openssl_init' \
+    '' \
+    '.include /etc/ssl/fipsmodule.cnf' \
+    '' \
+    '[openssl_init]' \
+    'providers = provider_sect' \
+    'alg_section = algorithm_sect' \
+    '' \
+    '[provider_sect]' \
+    'fips = fips_sect' \
+    'base = base_sect' \
+    'default = default_sect' \
+    '' \
+    '[base_sect]' \
+    'activate = 1' \
+    '' \
+    '[default_sect]' \
+    'activate = 1' \
+    '' \
+    '[algorithm_sect]' \
+    'default_properties = fips=yes' \
+    > /etc/ssl/openssl-fips.cnf
+
 COPY config/supervisor/supervisor /etc/init.d/
 COPY config/supervisor/ds/*.conf /etc/supervisor/conf.d/
 COPY run-document-server.sh /app/ds/run-document-server.sh
