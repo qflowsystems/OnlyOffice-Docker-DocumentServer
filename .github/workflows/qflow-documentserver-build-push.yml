@@ -107,11 +107,10 @@ jobs:
       - name: Prepare build args
         id: build-args
         run: |
-          BUILD_ARGS="COMPANY_NAME=onlyoffice
-PRODUCT_NAME=documentserver"
+          BUILD_ARGS="COMPANY_NAME=onlyoffice"
+          BUILD_ARGS="${BUILD_ARGS}"$'\n'"PRODUCT_NAME=documentserver"
           if [[ -n "${{ steps.meta.outputs.package_version }}" ]]; then
-            BUILD_ARGS="${BUILD_ARGS}
-PACKAGE_VERSION=${{ steps.meta.outputs.package_version }}"
+            BUILD_ARGS="${BUILD_ARGS}"$'\n'"PACKAGE_VERSION=${{ steps.meta.outputs.package_version }}"
             echo "📦 Including PACKAGE_VERSION: ${{ steps.meta.outputs.package_version }}"
           fi
           # Use heredoc for multiline output
