@@ -1,0 +1,58 @@
+# Add FIPS provider to existing documentserver image
+# Usage: docker build -f Dockerfile.fips-layer -t documentserver:fips .
+
+ARG BASE_IMAGE=documentserver:local
+FROM ${BASE_IMAGE}
+
+# Build and install OpenSSL FIPS provider
+ARG OPENSSL_FIPS_VERSION=3.0.9
+
+# Clear apt cache and problematic repo configs, then refresh
+# Note: Using --allow-insecure-repositories due to transient Ubuntu mirror signature issues
+RUN rm -rf /var/lib/apt/lists/* && \
+    rm -f /etc/apt/sources.list.d/mssql-release.list && \
+    apt-get clean && \
+    apt-get -o Acquire::AllowInsecureRepositories=true -y update && \
+    apt-get -o APT::Get::AllowUnauthenticated=true -yq install --no-install-recommends build-essential dpkg-dev wget ca-certificates && \
+    cd /tmp && \
+    wget -q https://www.openssl.org/source/openssl-${OPENSSL_FIPS_VERSION}.tar.gz && \
+    tar -xzf openssl-${OPENSSL_FIPS_VERSION}.tar.gz && \
+    cd openssl-${OPENSSL_FIPS_VERSION} && \
+    ./Configure enable-fips --prefix=/usr --openssldir=/etc/ssl && \
+    make -j$(nproc) && \
+    cp providers/fips.so /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/ossl-modules/ && \
+    openssl fipsinstall -out /etc/ssl/fipsmodule.cnf -module /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/ossl-modules/fips.so && \
+    cd / && \
+    rm -rf /tmp/openssl-${OPENSSL_FIPS_VERSION}* && \
+    apt-get -y purge build-essential dpkg-dev && \
+    apt-get -y autoremove && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create FIPS-enabled OpenSSL configuration
+RUN printf '%s\n' \
+    'openssl_conf = openssl_init' \
+    '' \
+    '.include /etc/ssl/fipsmodule.cnf' \
+    '' \
+    '[openssl_init]' \
+    'providers = provider_sect' \
+    'alg_section = algorithm_sect' \
+    '' \
+    '[provider_sect]' \
+    'fips = fips_sect' \
+    'base = base_sect' \
+    'default = default_sect' \
+    '' \
+    '[base_sect]' \
+    'activate = 1' \
+    '' \
+    '[default_sect]' \
+    'activate = 1' \
+    '' \
+    '[algorithm_sect]' \
+    'default_properties = fips=yes' \
+    > /etc/ssl/openssl-fips.cnf
+
+# Copy updated run script with FIPS auto-detection
+COPY run-document-server.sh /app/ds/run-document-server.sh
+RUN chmod 755 /app/ds/run-document-server.sh

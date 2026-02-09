@@ -1,0 +1,136 @@
+# FIPS-compatible Dockerfile for ONLYOFFICE DocumentServer
+# Uses RHEL UBI 9 which has certified FIPS support
+
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi:latest
+
+FROM ${BASE_IMAGE} AS documentserver
+LABEL maintainer="Ascensio System SIA <support@onlyoffice.com>"
+
+ARG PG_VERSION=16
+
+ENV LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    PG_VERSION=${PG_VERSION}
+
+ARG ONLYOFFICE_VALUE=onlyoffice
+
+# Install EPEL and required repositories
+RUN dnf install -y \
+    https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
+    && dnf install -y dnf-plugins-core \
+    && dnf config-manager --set-enabled crb \
+    && dnf clean all
+
+# Install PostgreSQL repository
+RUN dnf install -y \
+    https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm \
+    && dnf clean all
+
+# Install base dependencies
+RUN dnf install -y \
+    ca-certificates \
+    curl \
+    wget \
+    gnupg2 \
+    glibc-langpack-en \
+    openssl \
+    openssl-fips-provider \
+    && dnf clean all
+
+# Install application dependencies
+RUN dnf install -y \
+    cairo \
+    libcurl \
+    libxml2 \
+    libXScrnSaver \
+    libXtst \
+    gtk3 \
+    nspr \
+    nss \
+    libstdc++ \
+    alsa-lib \
+    boost-regex \
+    netcat \
+    pwgen \
+    supervisor \
+    nginx \
+    redis \
+    rabbitmq-server \
+    postgresql${PG_VERSION}-server \
+    postgresql${PG_VERSION} \
+    cronie \
+    xorg-x11-server-Xvfb \
+    vim-common \
+    unzip \
+    && dnf clean all
+
+# Configure PostgreSQL
+ENV PGDATA=/var/lib/pgsql/${PG_VERSION}/data
+RUN /usr/pgsql-${PG_VERSION}/bin/postgresql-${PG_VERSION}-setup initdb && \
+    systemctl enable postgresql-${PG_VERSION} || true
+
+# Copy fonts
+COPY fonts/ /usr/share/fonts/truetype/
+
+# Copy configuration files
+COPY config/supervisor/supervisor /etc/init.d/
+COPY config/supervisor/ds/*.conf /etc/supervisord.d/
+COPY run-document-server.sh /app/ds/run-document-server.sh
+
+# Download and configure Oracle Instant Client (optional - comment out if not needed)
+ENV OC_RELEASE_NUM=23
+ENV OC_RU_VER=7
+ENV OC_RU_REVISION_VER=0
+ENV OC_RESERVED_NUM=25
+ENV OC_RU_DATE=01
+ENV OC_PATH=${OC_RELEASE_NUM}${OC_RU_VER}0000
+ENV OC_FILE_SUFFIX=${OC_RELEASE_NUM}.${OC_RU_VER}.${OC_RU_REVISION_VER}.${OC_RESERVED_NUM}.${OC_RU_DATE}
+ENV OC_VER_DIR=${OC_RELEASE_NUM}_${OC_RU_VER}
+ENV OC_DOWNLOAD_URL=https://download.oracle.com/otn_software/linux/instantclient/${OC_PATH}
+
+COPY oracle/sqlplus /usr/bin/sqlplus
+
+EXPOSE 80 443
+
+ARG COMPANY_NAME=onlyoffice
+ARG PRODUCT_NAME=documentserver
+ARG PRODUCT_EDITION=
+ARG PACKAGE_VERSION=
+ARG TARGETARCH
+ARG PACKAGE_BASEURL="http://download.onlyoffice.com/install/documentserver/linux"
+
+ENV COMPANY_NAME=$COMPANY_NAME \
+    PRODUCT_NAME=$PRODUCT_NAME \
+    PRODUCT_EDITION=$PRODUCT_EDITION \
+    DS_PLUGIN_INSTALLATION=false \
+    DS_DOCKER_INSTALLATION=true
+
+# Download and install DocumentServer
+# Note: The .deb package won't work on RHEL - need .rpm or manual installation
+# This section needs adjustment based on available RHEL packages from ONLYOFFICE
+RUN echo "FIPS-compatible base image ready" && \
+    echo "DocumentServer package installation requires RHEL-compatible package"
+
+# Configure OpenSSL for FIPS mode compatibility
+RUN echo "# FIPS-compatible OpenSSL configuration" > /etc/pki/tls/openssl-fips.cnf && \
+    echo "openssl_conf = openssl_init" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "[openssl_init]" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "providers = provider_sect" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "[provider_sect]" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "fips = fips_sect" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "base = base_sect" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "[fips_sect]" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "activate = 1" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "[base_sect]" >> /etc/pki/tls/openssl-fips.cnf && \
+    echo "activate = 1" >> /etc/pki/tls/openssl-fips.cnf
+
+# Create non-root user for running services
+RUN groupadd -r ds && useradd -r -g ds ds
+
+VOLUME /var/log/${COMPANY_NAME} /var/lib/${COMPANY_NAME} /var/www/${COMPANY_NAME}/Data
+
+ENTRYPOINT ["/app/ds/run-document-server.sh"]

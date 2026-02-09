@@ -92,6 +92,38 @@ SSL_DHPARAM_PATH=${SSL_DHPARAM_PATH:-${SSL_CERTIFICATES_DIR}/dhparam.pem}
 SSL_VERIFY_CLIENT=${SSL_VERIFY_CLIENT:-off}
 USE_UNAUTHORIZED_STORAGE=${USE_UNAUTHORIZED_STORAGE:-false}
 ONLYOFFICE_HTTPS_HSTS_ENABLED=${ONLYOFFICE_HTTPS_HSTS_ENABLED:-true}
+
+# FIPS compatibility settings
+# Auto-detect if running on a FIPS-enabled host and configure OpenSSL accordingly
+FIPS_ENABLED=${FIPS_ENABLED:-auto}
+if [ "$FIPS_ENABLED" = "auto" ]; then
+  if [ -f /proc/sys/crypto/fips_enabled ] && [ "$(cat /proc/sys/crypto/fips_enabled)" = "1" ]; then
+    FIPS_ENABLED="true"
+    echo "FIPS mode detected on host kernel, enabling FIPS-compliant OpenSSL configuration"
+  else
+    FIPS_ENABLED="false"
+  fi
+fi
+
+if [ "$FIPS_ENABLED" = "true" ]; then
+  # Use FIPS-enabled OpenSSL configuration
+  if [ -f /etc/ssl/openssl-fips.cnf ]; then
+    export OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
+    echo "Using FIPS OpenSSL configuration: $OPENSSL_CONF"
+  else
+    echo "WARNING: FIPS mode requested but /etc/ssl/openssl-fips.cnf not found"
+    echo "Consider setting DB_SSL_MODE=disable as a workaround"
+  fi
+fi
+
+# Set DB_SSL_MODE to 'disable' to skip SSL for database connections (workaround for FIPS issues)
+# Set DB_SSL_MODE to 'require' or 'verify-full' for encrypted connections
+DB_SSL_MODE=${DB_SSL_MODE:-prefer}
+export PGSSLMODE=${DB_SSL_MODE}
+
+# FIPS-approved TLS settings for PostgreSQL client
+# Requires TLS 1.2+ which uses FIPS-compliant protocols
+export PGSSLMINPROTOCOLVERSION=${PGSSLMINPROTOCOLVERSION:-TLSv1.2}
 ONLYOFFICE_HTTPS_HSTS_MAXAGE=${ONLYOFFICE_HTTPS_HSTS_MAXAGE:-31536000}
 SYSCONF_TEMPLATES_DIR="/app/ds/setup/config"
 
@@ -118,7 +150,7 @@ else
   JWT_ENABLED="false"
 fi
 
-[ -z $JWT_SECRET ] && JWT_MESSAGE='JWT is enabled by default. A random secret is generated automatically. Run the command "docker exec $(sudo docker ps -q) sudo documentserver-jwt-status.sh" to get information about JWT.'
+[ -z "$JWT_SECRET" ] && JWT_MESSAGE='JWT is enabled by default. A random secret is generated automatically. Run the command "docker exec $(sudo docker ps -q) sudo documentserver-jwt-status.sh" to get information about JWT.'
 
 JWT_SECRET=${JWT_SECRET:-$(pwgen -s 32)}
 JWT_HEADER=${JWT_HEADER:-Authorization}
