@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   build:
-    runs-on: self-hosted
     steps:
       - name: Promote to production
         uses: qflowsystems/build-publish/promotion@v10.0

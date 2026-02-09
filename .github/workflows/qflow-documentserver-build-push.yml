@@ -41,7 +41,6 @@ env:
 jobs:
   build:
     name: Build DocumentServer Docker Image
-    runs-on: self-hosted
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
       should_push: ${{ steps.meta.outputs.should_push }}
@@ -131,7 +130,6 @@ jobs:
     name: Push to ECR
     needs: build
     if: needs.build.outputs.should_push == 'true'
-    runs-on: self-hosted
     permissions:
       id-token: write
       contents: read
@@ -181,7 +179,6 @@ jobs:
   security-scan:
     name: Security Scan with Trivy
     needs: build
-    runs-on: self-hosted
 
     steps:
       - name: Checkout code
@@ -274,7 +271,6 @@ jobs:
     name: Upload to AWS Security Hub
     needs: [build, security-scan]
     if: needs.build.outputs.should_push == 'true'
-    runs-on: self-hosted
     permissions:
       id-token: write
       contents: read
@@ -408,7 +404,6 @@ jobs:
     name: Sign Image with Cosign
     needs: [build, push-to-ecr]
     if: needs.build.outputs.should_push == 'true'
-    runs-on: self-hosted
     permissions:
       id-token: write
       contents: read
@@ -443,7 +438,6 @@ jobs:
     name: Build Summary
     needs: [build, push-to-ecr, security-scan, security-hub, sign-image]
     if: always()
-    runs-on: self-hosted
 
     steps:
       - name: Generate summary
