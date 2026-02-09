@@ -1,3 +1,76 @@
+# QFlow Fork Notice
+
+> **This repository is a fork of [ONLYOFFICE/Docker-DocumentServer](https://github.com/ONLYOFFICE/Docker-DocumentServer).**
+>
+> Modified by **USDA (United States Department of Agriculture)** and maintained by **qflowsystems**.
+>
+> This work is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE.txt).
+>
+> **Source Code:** In compliance with AGPL-3.0, the complete source code is available at:  
+> https://github.com/qflowsystems/OnlyOffice-Docker-DocumentServer
+
+---
+
+## QFlow Build Process
+
+This fork includes modifications for FIPS 140-2/140-3 compliance and uses a custom CI/CD pipeline to build and publish Docker images to AWS ECR.
+
+### Modifications from Upstream
+
+- **FIPS Compliance**: Added OpenSSL FIPS provider to the base `Dockerfile`
+- **Alternative FIPS Build**: Added `Dockerfile.fips` using RHEL UBI 9 with native FIPS support
+- **FIPS Layer Build**: Added `Dockerfile.fips-layer` for adding FIPS to existing images
+- **Auto-detection**: Modified `run-document-server.sh` to auto-detect FIPS mode on host
+- **Security Scanning**: Trivy vulnerability scanning with SBOM generation
+- **Image Signing**: Cosign keyless signing for supply chain security
+
+### Version Alignment
+
+Our release tags align with the upstream [ONLYOFFICE/DocumentServer tags](https://github.com/ONLYOFFICE/DocumentServer/tags). When we tag a release (e.g., `v9.2.1`), the `PACKAGE_VERSION` build argument is set to match, ensuring the installed DocumentServer version corresponds to the official ONLYOFFICE release.
+
+### Building the Docker Image
+
+#### Using GitHub Actions (CI/CD)
+
+The workflow automatically builds and pushes to ECR:
+
+| Trigger | Action |
+|---------|--------|
+| Push to `master` | Build and scan only (no push) |
+| Push a tag (e.g., `v9.2.1`) | Build, scan, push to ECR, sign |
+| Manual dispatch | Build with optional ECR push |
+
+#### Building Locally
+
+**Standard build (with FIPS provider):**
+```bash
+docker build -t documentserver:local .
+```
+
+**Build with specific version (matching upstream tag):**
+```bash
+docker build \
+  --build-arg PACKAGE_VERSION=9.2.1 \
+  --build-arg COMPANY_NAME=onlyoffice \
+  --build-arg PRODUCT_NAME=documentserver \
+  -t documentserver:9.2.1 .
+```
+
+**FIPS build using RHEL UBI 9:**
+```bash
+docker build -f Dockerfile.fips -t documentserver:fips .
+```
+
+For detailed modification information, see [MODIFICATIONS.md](./MODIFICATIONS.md).
+
+---
+
+# Original ONLYOFFICE Documentation
+
+*The documentation below is from the original ONLYOFFICE project.*
+
+---
+
 * [Overview](#overview)
 * [Functionality](#functionality)
 * [Recommended System Requirements](#recommended-system-requirements)
