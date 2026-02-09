@@ -40,6 +40,7 @@ env:
 
 jobs:
   build:
+    runs-on: ubuntu-24.04
     name: Build DocumentServer Docker Image
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
@@ -130,6 +131,7 @@ jobs:
     name: Push to ECR
     needs: build
     if: needs.build.outputs.should_push == 'true'
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: read
@@ -179,7 +181,7 @@ jobs:
   security-scan:
     name: Security Scan with Trivy
     needs: build
-
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -271,6 +273,7 @@ jobs:
     name: Upload to AWS Security Hub
     needs: [build, security-scan]
     if: needs.build.outputs.should_push == 'true'
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: read
@@ -404,6 +407,7 @@ jobs:
     name: Sign Image with Cosign
     needs: [build, push-to-ecr]
     if: needs.build.outputs.should_push == 'true'
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: read
@@ -438,7 +442,7 @@ jobs:
     name: Build Summary
     needs: [build, push-to-ecr, security-scan, security-hub, sign-image]
     if: always()
-
+    runs-on: ubuntu-24.04
     steps:
       - name: Generate summary
         run: |

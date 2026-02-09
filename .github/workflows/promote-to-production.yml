@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build:
+    runs-on: ubuntu-24.04
     steps:
       - name: Promote to production
         uses: qflowsystems/build-publish/promotion@v10.0
