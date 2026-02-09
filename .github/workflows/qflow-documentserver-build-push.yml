@@ -1,0 +1,479 @@
+name: 'QFlow: Build, Scan & Push DocumentServer to ECR'
+
+on:
+  # Build and scan on master branch pushes (no ECR push)
+  # Build, scan, and push to ECR on version tags
+  push:
+    branches:
+      - master
+    tags:
+      - '*'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
+      - '!.github/workflows/qflow-documentserver-build-push.yml'
+
+  # Manual trigger with optional push control
+  workflow_dispatch:
+    inputs:
+      push_to_ecr:
+        description: 'Push to ECR'
+        required: false
+        type: boolean
+        default: false
+      dockerfile:
+        description: 'Dockerfile to use'
+        required: false
+        type: choice
+        options:
+          - Dockerfile
+          - Dockerfile.fips
+        default: 'Dockerfile'
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: '397666958145'
+  ECR_REPOSITORY: staging/onlyoffice-documentserver
+  DOCKER_IMAGE_NAME: onlyoffice-documentserver
+  LOCAL_IMAGE_TAG: onlyoffice-documentserver:local
+
+jobs:
+  build:
+    name: Build DocumentServer Docker Image
+    runs-on: self-hosted
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      should_push: ${{ steps.meta.outputs.should_push }}
+      ecr_image: ${{ steps.meta.outputs.ecr_image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine build metadata
+        id: meta
+        run: |
+          # Determine if we should push to ECR
+          SHOULD_PUSH="false"
+          IMAGE_TAG=""
+
+          # shellcheck disable=SC2193
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Git tag - extract version
+            IMAGE_TAG="${GITHUB_REF#refs/tags/}"
+            SHOULD_PUSH="true"
+            echo "📦 Building tagged release: $IMAGE_TAG"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.push_to_ecr }}" == "true" ]]; then
+            # Manual trigger with push enabled
+            IMAGE_TAG="manual-${GITHUB_SHA::8}"
+            SHOULD_PUSH="true"
+            echo "🚀 Manual build with ECR push: $IMAGE_TAG"
+          else
+            # Master branch or other - build only
+            IMAGE_TAG="master-${GITHUB_SHA::8}"
+            SHOULD_PUSH="false"
+            echo "🔍 Build and scan only (no push): $IMAGE_TAG"
+          fi
+
+          ECR_IMAGE="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+
+          {
+            echo "tag=${IMAGE_TAG}"
+            echo "should_push=${SHOULD_PUSH}"
+            echo "ecr_image=${ECR_IMAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Determine Dockerfile
+        id: dockerfile
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            DOCKERFILE="${{ inputs.dockerfile }}"
+          else
+            DOCKERFILE="Dockerfile"
+          fi
+          echo "dockerfile=${DOCKERFILE}" >> "$GITHUB_OUTPUT"
+          echo "📄 Using Dockerfile: ${DOCKERFILE}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./${{ steps.dockerfile.outputs.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.LOCAL_IMAGE_TAG }}
+          build-args: |
+            COMPANY_NAME=onlyoffice
+            PRODUCT_NAME=documentserver
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save Docker image
+        run: |
+          echo "💾 Saving Docker image for downstream jobs..."
+          docker save ${{ env.LOCAL_IMAGE_TAG }} | gzip > /tmp/documentserver-image.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentserver-docker-image
+          path: /tmp/documentserver-image.tar.gz
+          retention-days: 1
+
+  push-to-ecr:
+    name: Push to ECR
+    needs: build
+    if: needs.build.outputs.should_push == 'true'
+    runs-on: self-hosted
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: documentserver-docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: |
+          echo "📦 Loading Docker image..."
+          docker load < /tmp/documentserver-image.tar.gz
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/prod-github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+          docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Create ECR repository if needed
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --region ${{ env.AWS_REGION }} \
+            --image-tag-mutability IMMUTABLE \
+            --image-scanning-configuration scanOnPush=false
+
+      - name: Tag and push image to ECR
+        run: |
+          echo "🏷️  Tagging image: ${{ needs.build.outputs.ecr_image }}"
+          docker tag ${{ env.LOCAL_IMAGE_TAG }} ${{ needs.build.outputs.ecr_image }}
+
+          echo "⬆️  Pushing to ECR..."
+          docker push ${{ needs.build.outputs.ecr_image }}
+
+          echo "✅ Successfully pushed: ${{ needs.build.outputs.ecr_image }}"
+
+  security-scan:
+    name: Security Scan with Trivy
+    needs: build
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: documentserver-docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: |
+          echo "📦 Loading Docker image for scanning..."
+          docker load < /tmp/documentserver-image.tar.gz
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1
+        with:
+          version: 'v0.67.2'
+          cache: 'true'
+          token: ${{ github.token }}
+
+      - name: Run Trivy vulnerability scan
+        run: |
+          echo "🔒 Running Trivy vulnerability scan..."
+          mkdir -p security-scan-results
+
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output security-scan-results/trivy-results.json \
+            ${{ env.LOCAL_IMAGE_TAG }}
+
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --format table \
+            --output security-scan-results/trivy-results.txt \
+            ${{ env.LOCAL_IMAGE_TAG }}
+
+      - name: Run Trivy secret scan
+        run: |
+          echo "🔐 Running Trivy secret scan..."
+          trivy image \
+            --scanners secret \
+            --secret-config .trivy/trivy-secret.yaml \
+            --format json \
+            --output security-scan-results/trivy-secrets.json \
+            ${{ env.LOCAL_IMAGE_TAG }}
+
+      - name: Generate SBOM
+        run: |
+          echo "📋 Generating SBOM..."
+          trivy image \
+            --format cyclonedx \
+            --output security-scan-results/sbom.json \
+            ${{ env.LOCAL_IMAGE_TAG }}
+
+      - name: Check for critical vulnerabilities
+        run: |
+          echo "🚨 Checking for critical vulnerabilities..."
+
+          critical_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' security-scan-results/trivy-results.json)
+          high_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' security-scan-results/trivy-results.json)
+
+          echo "🔴 Critical: $critical_count"
+          echo "🟠 High: $high_count"
+
+          if [[ $critical_count -gt 0 ]]; then
+            echo "⚠️  Warning: $critical_count critical vulnerabilities found!"
+            echo "Review security-scan-results for details."
+          fi
+
+      - name: Upload security scan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-results
+          path: security-scan-results/
+          retention-days: 7
+
+      - name: Display scan summary
+        if: always()
+        run: |
+          echo "📊 Security Scan Summary"
+          echo "======================="
+          cat security-scan-results/trivy-results.txt || echo "No vulnerability report found"
+
+  security-hub:
+    name: Upload to AWS Security Hub
+    needs: [build, security-scan]
+    if: needs.build.outputs.should_push == 'true'
+    runs-on: self-hosted
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Download security scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: security-scan-results
+          path: security-scan-results
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/prod-github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Convert Trivy results to Security Hub format
+        run: |
+          echo "📤 Converting Trivy results to Security Hub format..."
+          python .github/scripts/convert_to_security_hub.py \
+            security-scan-results/trivy-results.json \
+            "${{ env.ECR_REPOSITORY }}" \
+            "${{ needs.build.outputs.image_tag }}" \
+            "${{ github.sha }}"
+
+      - name: Archive previous findings
+        run: |
+          echo "🗑️  Archiving previous findings for this image..."
+
+          RESOURCE_ARN="arn:aws:ecr:${{ env.AWS_REGION }}:${{ env.AWS_ACCOUNT_ID }}:repository/${{ env.ECR_REPOSITORY }}:${{ needs.build.outputs.image_tag }}"
+
+          existing_findings=$(aws securityhub get-findings \
+            --filters '{
+              "ResourceId": [{"Value": "'"$RESOURCE_ARN"'", "Comparison": "EQUALS"}],
+              "RecordState": [{"Value": "ACTIVE", "Comparison": "EQUALS"}],
+              "ProductArn": [{"Value": "arn:aws:securityhub:${{ env.AWS_REGION }}::product/aquasecurity/aquasecurity", "Comparison": "EQUALS"}]
+            }' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Findings[].Id' \
+            --output json)
+
+          finding_count=$(echo "$existing_findings" | jq 'length')
+
+          if [[ $finding_count -gt 0 ]]; then
+            echo "Found $finding_count existing findings to archive"
+
+            echo "$existing_findings" | jq -c --argjson batch_size 100 '
+              [_nwise($batch_size)] |
+              to_entries[] |
+              {key: .key, value: .value}
+            ' | while read -r batch; do
+              finding_ids=$(echo "$batch" | jq '.value')
+              batch_size=$(echo "$finding_ids" | jq 'length')
+
+              if [[ $batch_size -gt 0 ]]; then
+                finding_identifiers=$(echo "$finding_ids" | jq 'map({
+                  Id: .,
+                  ProductArn: "arn:aws:securityhub:${{ env.AWS_REGION }}::product/aquasecurity/aquasecurity"
+                })')
+
+                aws securityhub batch-update-findings \
+                  --finding-identifiers "$finding_identifiers" \
+                  --workflow '{"Status": "SUPPRESSED"}' \
+                  --note '{"Text": "Archived due to image rescan", "UpdatedBy": "documentserver-github-action"}' \
+                  --region ${{ env.AWS_REGION }}
+              fi
+            done
+          else
+            echo "✅ No existing findings to archive"
+          fi
+
+      - name: Upload findings to Security Hub
+        run: |
+          echo "📤 Uploading findings to AWS Security Hub..."
+
+          finding_count=$(jq 'length' security-hub-findings.json)
+
+          if [[ $finding_count -eq 0 ]]; then
+            echo "✅ No security findings to upload"
+            exit 0
+          fi
+
+          echo "Uploading $finding_count findings..."
+
+          # Split into batches of 100
+          jq -c --argjson batch_size 100 '
+            [_nwise($batch_size)] |
+            to_entries[] |
+            {key: .key, value: .value}
+          ' security-hub-findings.json | while read -r batch; do
+            batch_num=$(echo "$batch" | jq '.key')
+            findings=$(echo "$batch" | jq '.value')
+
+            echo "$findings" > "batch_${batch_num}.json"
+
+            aws securityhub batch-import-findings \
+              --findings "file://batch_${batch_num}.json" \
+              --region ${{ env.AWS_REGION }}
+
+            rm "batch_${batch_num}.json"
+          done
+
+          echo "🎉 Security Hub upload completed!"
+
+      - name: Display security summary
+        run: |
+          echo "📊 Security Hub Upload Summary"
+          echo "=============================="
+
+          critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' security-scan-results/trivy-results.json)
+          high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' security-scan-results/trivy-results.json)
+          medium=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' security-scan-results/trivy-results.json)
+
+          echo "🔴 Critical: $critical"
+          echo "🟠 High: $high"
+          echo "🟡 Medium: $medium"
+          echo ""
+          echo "Findings uploaded to AWS Security Hub for image:"
+          echo "${{ needs.build.outputs.ecr_image }}"
+
+  sign-image:
+    name: Sign Image with Cosign
+    needs: [build, push-to-ecr]
+    if: needs.build.outputs.should_push == 'true'
+    runs-on: self-hosted
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/prod-github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+          docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Sign Docker image with Cosign
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          echo "✍️  Signing Docker image with Cosign..."
+          echo "Image: ${{ needs.build.outputs.ecr_image }}"
+
+          cosign sign --yes ${{ needs.build.outputs.ecr_image }}
+
+          echo "✅ Image signature created and stored in ECR"
+
+  summary:
+    name: Build Summary
+    needs: [build, push-to-ecr, security-scan, security-hub, sign-image]
+    if: always()
+    runs-on: self-hosted
+
+    steps:
+      - name: Generate summary
+        run: |
+          {
+            echo "# DocumentServer Build Summary"
+            echo ""
+            echo "**Image Tag:** ${{ needs.build.outputs.image_tag }}"
+            echo "**Pushed to ECR:** ${{ needs.build.outputs.should_push }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ needs.build.outputs.should_push }}" == "true" ]]; then
+            {
+              echo "**ECR Image:** \`${{ needs.build.outputs.ecr_image }}\`"
+              echo "**Signed:** ${{ needs.sign-image.result == 'success' && '✅' || '❌' }}"
+              echo "**Security Hub:** ${{ needs.security-hub.result == 'success' && '✅' || '❌' }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            echo ""
+            echo "## Job Status"
+            echo "- Build: ${{ needs.build.result == 'success' && '✅' || '❌' }}"
+            echo "- Security Scan: ${{ needs.security-scan.result == 'success' && '✅' || '❌' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ needs.build.outputs.should_push }}" == "true" ]]; then
+            {
+              echo "- Push to ECR: ${{ needs.push-to-ecr.result == 'success' && '✅' || '❌' }}"
+              echo "- Security Hub: ${{ needs.security-hub.result == 'success' && '✅' || '❌' }}"
+              echo "- Image Signing: ${{ needs.sign-image.result == 'success' && '✅' || '❌' }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
