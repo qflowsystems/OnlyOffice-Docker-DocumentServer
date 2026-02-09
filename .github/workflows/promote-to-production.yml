@@ -1,0 +1,17 @@
+name: promote-to-prod
+
+on: [workflow_dispatch]
+
+permissions:
+  checks: write
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - name: Promote to production
+        uses: qflowsystems/build-publish/promotion@v10.0
+        with:
+          name-override: 'onlyoffice-documentserver'
